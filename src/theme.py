@@ -6,24 +6,28 @@ class ModernTheme:
     - 尺寸：全局12px，控件紧凑有序
     - 适用于 PySide6
     """
-    # ---------- 颜色系统 ----------
-    BG_MAIN = "#F8FAFC"          # 主背景（极浅灰蓝）
-    BG_CARD = "#FFFFFF"          # 卡片/控件背景（纯白）
-    TEXT_PRIMARY = "#0F172A"     # 主要文本（深灰蓝）
-    TEXT_SECONDARY = "#475569"   # 辅助文本（中灰）
-    BORDER = "#E2E8F0"          # 边框色（浅灰）
-    BORDER_FOCUS = "#94A3B8"    # 聚焦边框（中灰）
-    PRIMARY = "#2563EB"         # 主色调（蓝）
-    PRIMARY_HOVER = "#1D4ED8"   # 主色悬停（深蓝）
-    PRIMARY_PRESSED = "#1E3A8A" # 主色按下（更深蓝）
-    SELECTED_BG = "#EFF6FF"     # 选中背景（淡蓝）
-    HOVER_BG = "#F1F5F9"        # 悬停背景（极淡灰）
-    DISABLED_BG = "#F1F5F9"     # 禁用背景
-    DISABLED_TEXT = "#94A3B8"   # 禁用文本
-    PROGRESS_BG = "#E2E8F0"     # 进度条背景
-    SCROLLBAR_HANDLE = "#CBD5E1" # 滚动条滑块
-    SCROLLBAR_HOVER = "#94A3B8" # 滚动条滑块悬停
 
+    # ---------- 颜色系统 ----------
+    BG_MAIN = "#F8FAFC"  # 主背景（极浅灰蓝）
+    BG_CARD = "#FFFFFF"  # 卡片/控件背景（纯白）
+    TEXT_PRIMARY = "#0F172A"  # 主要文本（深灰蓝）
+    TEXT_SECONDARY = "#475569"  # 辅助文本（中灰）
+    BORDER = "#E2E8F0"  # 边框色（浅灰）
+    BORDER_FOCUS = "#94A3B8"  # 聚焦边框（中灰）
+    PRIMARY = "#2563EB"  # 主色调（蓝）
+    PRIMARY_HOVER = "#1D4ED8"  # 主色悬停（深蓝）
+    PRIMARY_PRESSED = "#1E3A8A"  # 主色按下（更深蓝）
+    SELECTED_BG = "#EFF6FF"  # 选中背景（淡蓝）
+    HOVER_BG = "#F1F5F9"  # 悬停背景（极淡灰）
+    DISABLED_BG = "#F1F5F9"  # 禁用背景
+    DISABLED_TEXT = "#94A3B8"  # 禁用文本
+    PROGRESS_BG = "#E2E8F0"  # 进度条背景
+    SCROLLBAR_HANDLE = "#CBD5E1"  # 滚动条滑块
+    SCROLLBAR_HOVER = "#94A3B8"  # 滚动条滑块悬停
+    # 验证图标样式
+    VALID_COLOR = "#10B981"  # 绿色（成功）
+    INVALID_COLOR = "#EF4444"  # 红色（错误）
+    ICON_SIZE = 16  # 图标字体大小（px）
     # ---------- 样式表 ----------
     STYLESHEET = f"""
         /* ========== 全局基础 ========== */
@@ -51,6 +55,12 @@ class ModernTheme:
         QLineEdit:disabled {{
             background-color: {DISABLED_BG};
             color: {DISABLED_TEXT};
+        }}
+        QLineEdit[valid="true"] {{
+            border: 1px solid #10B981;   /* 绿色边框 */
+        }}
+        QLineEdit[valid="false"] {{
+            border: 1px solid #EF4444;   /* 红色边框 */
         }}
 
         /* ========== 按钮 ========== */
@@ -271,6 +281,16 @@ class ModernTheme:
         QLabel[note="true"] {{
             color: {TEXT_SECONDARY};
             font-size: 11px;
+        }}
+        QLabel[valid="true"] {{ 
+            color: {VALID_COLOR}; 
+            font-weight: bold; 
+            font-size: {ICON_SIZE}px; 
+        }}
+        QLabel[valid="false"] {{ 
+            color:{INVALID_COLOR}; 
+            font-weight: bold; 
+            font-size: {ICON_SIZE}px;
         }}
         /* ========== 分割条 ========== */
         QSplitter::handle {{
