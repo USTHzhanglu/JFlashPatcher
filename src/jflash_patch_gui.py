@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QLabel,
+    QSplitter,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QObject, Slot
 from PySide6.QtGui import QFont, QTextCursor, QAction
@@ -44,13 +45,10 @@ __author__ = "USTHzhanglu@outlook.com"
 __deepseek__ = "Powered by DeepSeek"
 
 
-# ----------------------------------------------------------------------
-# GUI 交互：选择设备子文件夹（PySide6 弹窗）
-# ----------------------------------------------------------------------
-def select_folder_gui(mcu_folder, parent_widget=None):
+def auto_select_device_folder(mcu_folder, parent_widget=None):
     """
-    PySide6 弹窗选择子文件夹
-    parent_widget: 父窗口，用于显示对话框
+    自动选择设备子文件夹（无用户交互）
+    规则：优先 JLinkDevices -> Devices -> 唯一子文件夹 -> 多个子文件夹时选择第一个
     """
     subdirs = [d for d in Path(mcu_folder).iterdir() if d.is_dir()]
     subdir_names = [d.name for d in subdirs]
@@ -72,20 +70,9 @@ def select_folder_gui(mcu_folder, parent_widget=None):
     if len(subdirs) == 1:
         return str(subdirs[0]), True
 
-    # 多个子文件夹 -> 弹窗让用户选择
-    item, ok = QInputDialog.getItem(
-        parent_widget,
-        "选择设备文件夹",
-        f"在 {os.path.basename(mcu_folder)} 下发现多个子文件夹，请选择包含算法文件的文件夹：",
-        subdir_names,
-        0,
-        False,
-    )
-    if ok and item:
-        idx = subdir_names.index(item)
-        return str(subdirs[idx]), True
-    else:
-        return None, False
+    # 多个子文件夹：选择第一个并记录警告（通过日志）
+    # 注意：这里无法直接输出日志，将在 run 中处理
+    return str(subdirs[0]), True
 
 
 # ----------------------------------------------------------------------
@@ -102,23 +89,74 @@ class PatchWorker(QObject):
         self.selected_folders = selected_folders
         self.backup = backup
         self.parent_widget = None
+        self._is_running = True
+
+    def stop(self):
+        self._is_running = False
 
     def set_parent_widget(self, widget):
         self.parent_widget = widget
+
+    @staticmethod
+    def auto_select_device_folder(mcu_folder):
+        """自动选择设备子文件夹，无交互"""
+        from pathlib import Path
+
+        subdirs = [d for d in Path(mcu_folder).iterdir() if d.is_dir()]
+        subdir_names = [d.name for d in subdirs]
+
+        if not subdirs:
+            return None, False
+
+        if "JLinkDevices" in subdir_names:
+            idx = subdir_names.index("JLinkDevices")
+            return str(subdirs[idx]), True
+
+        if "Devices" in subdir_names:
+            idx = subdir_names.index("Devices")
+            return str(subdirs[idx]), True
+
+        if len(subdirs) == 1:
+            return str(subdirs[0]), True
+
+        # 多个子文件夹，选择第一个（并记录日志，将在 run 中处理）
+        return str(subdirs[0]), True
 
     @Slot()
     def run(self):
         total = len(self.selected_folders)
         for idx, folder in enumerate(self.selected_folders):
+            if not self._is_running:  # 检查停止标志
+                self.log_signal.emit("用户中断操作，停止处理。")
+                break
             self.log_signal.emit(
                 f"\n--- 正在处理 ({idx+1}/{total}): {os.path.basename(folder)} ---"
             )
 
-            # 使用 GUI 版选择回调
+            # 自动选择设备子文件夹
+            selected_path, found = self.auto_select_device_folder(folder)
+            if not found:
+                self.log_signal.emit(
+                    f"  错误：{os.path.basename(folder)} 下无有效子文件夹，跳过"
+                )
+                continue
+
+            # 检查是否为多选且自动选择了第一个，记录提示
+            subdirs = [d.name for d in Path(folder).iterdir() if d.is_dir()]
+            if (
+                len(subdirs) > 1
+                and "JLinkDevices" not in subdirs
+                and "Devices" not in subdirs
+            ):
+                self.log_signal.emit(
+                    f"  检测到多个子文件夹，自动选择第一个：{selected_path}"
+                )
+
+            # 使用 process_patch，传入固定结果的回调
             process_patch(
                 folder,
                 self.jflash_dir,
-                select_callback=lambda f, p=self.parent_widget: select_folder_gui(f, p),
+                select_callback=lambda f, p=None: (selected_path, True),
                 backup=self.backup,
                 log_func=self.log_signal.emit,
             )
@@ -174,14 +212,15 @@ class MainWindow(QMainWindow):
         self.worker_thread = None
         self.worker = None
         self.backup_enabled = True  # 默认开启备份
+        self.jflash_valid = False  # JFlash 安装目录是否有效
+        self.patch_root_valid = False  # MCU 补丁根目录是否有效
 
         self.init_ui()
         self.create_menu()
         self.load_default_jflash_path()
+        self.set_default_patch_root()
+        self.update_start_button_state()
         self.setStyleSheet(ModernTheme.STYLESHEET)
-        default_patch_dir = os.path.dirname(os.path.abspath(__file__))
-        self.patch_root_edit.setText(default_patch_dir + "/patchs")
-        self.scan_patches()
 
     def init_ui(self):
         """初始化用户界面（左右分栏：左侧补丁列表，右侧日志）"""
@@ -190,7 +229,7 @@ class MainWindow(QMainWindow):
         main_layout = QVBoxLayout(central_widget)
         main_layout.setSpacing(12)
         main_layout.setContentsMargins(12, 12, 12, 12)
-
+        button_width = 85
         # ===== 1. JFlash 安装目录组 =====
         jlink_group = QGroupBox("JFlash 安装目录")
         jlink_layout = QHBoxLayout()
@@ -199,16 +238,17 @@ class MainWindow(QMainWindow):
         self.jlink_path_edit = QLineEdit()
         self.jlink_path_edit.setPlaceholderText("请选择或自动检测...")
         self.jlink_path_edit.setReadOnly(True)
+        self.jlink_status_label = QLabel()  # 新增状态标签
+        self.jlink_status_label.setFixedSize(20, 20)  # 固定大小
+        self.jlink_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.jlink_browse_btn = QPushButton("浏览...")
         self.jlink_browse_btn.setObjectName("Secondary")
+        self.jlink_browse_btn.setFixedWidth(button_width)
         self.jlink_browse_btn.clicked.connect(self.browse_jlink_path)
-        self.jlink_detect_btn = QPushButton("自动检测")
-        self.jlink_detect_btn.setObjectName("Secondary")
-        self.jlink_detect_btn.clicked.connect(self.detect_jflash_path)
 
         jlink_layout.addWidget(self.jlink_path_edit, 1)
+        jlink_layout.addWidget(self.jlink_status_label)  # 新增
         jlink_layout.addWidget(self.jlink_browse_btn)
-        jlink_layout.addWidget(self.jlink_detect_btn)
         jlink_group.setLayout(jlink_layout)
         main_layout.addWidget(jlink_group)
 
@@ -220,22 +260,21 @@ class MainWindow(QMainWindow):
         self.patch_root_edit = QLineEdit()
         self.patch_root_edit.setPlaceholderText("包含多个 MCU 补丁文件夹的目录...")
         self.patch_root_edit.setReadOnly(True)
+        self.patch_root_status_label = QLabel()  # 状态标签
+        self.patch_root_status_label.setFixedSize(20, 20)
+        self.patch_root_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.patch_root_browse_btn = QPushButton("浏览...")
         self.patch_root_browse_btn.setObjectName("Secondary")
+        self.patch_root_browse_btn.setFixedWidth(button_width)
         self.patch_root_browse_btn.clicked.connect(self.browse_patch_root)
-        self.scan_btn = QPushButton("扫描补丁")
-        self.scan_btn.setObjectName("Secondary")
-        self.scan_btn.clicked.connect(self.scan_patches)
 
         patch_root_layout.addWidget(self.patch_root_edit, 1)
+        patch_root_layout.addWidget(self.patch_root_status_label)  # 新增
         patch_root_layout.addWidget(self.patch_root_browse_btn)
-        patch_root_layout.addWidget(self.scan_btn)
         patch_root_group.setLayout(patch_root_layout)
         main_layout.addWidget(patch_root_group)
 
         # ===== 3. 创建水平分割器（左侧补丁列表，右侧日志）=====
-        from PySide6.QtWidgets import QSplitter
-        from PySide6.QtCore import Qt
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setChildrenCollapsible(False)  # 禁止完全折叠
@@ -287,7 +326,6 @@ class MainWindow(QMainWindow):
         # 设置初始宽度比例：左侧70%，右侧30%（可自由拖动）
         splitter.setStretchFactor(0, 7)  # 补丁列表
         splitter.setStretchFactor(1, 3)  # 日志
-        splitter.setChildrenCollapsible(False)  # 禁止完全折叠
 
         # 将分割器加入主布局，并设置拉伸因子为1（占满剩余空间）
         main_layout.addWidget(splitter, 1)
@@ -337,29 +375,126 @@ class MainWindow(QMainWindow):
         QMessageBox.about(self, "关于", about_text)
 
     # ------------------------------------------------------------------
+    # 验证函数
+    # ------------------------------------------------------------------
+    def _check_jflash_exe(self, path):
+        """检查 JFlash 可执行文件是否存在"""
+        if not path or not os.path.isdir(path):
+            return False
+        is_windows = sys.platform.startswith("win")
+        exe_name = "jflash.exe" if is_windows else "JFlashExe"
+        exe_path = os.path.join(path, exe_name)
+        exe_exists = os.path.isfile(exe_path)
+        return exe_exists
+
+    def validate_jflash_path(self, path=None):
+        if path is None:
+            path = self.jlink_path_edit.text().strip()
+        is_valid = self._check_jflash_exe(path)
+        self.jflash_valid = is_valid
+        self.jlink_status_label.setText("✓" if is_valid else "✗")
+        self.jlink_status_label.setProperty("valid", is_valid)
+        self.jlink_path_edit.setProperty("valid", is_valid)
+        # 强制刷新样式
+        self.jlink_status_label.style().unpolish(self.jlink_status_label)
+        self.jlink_status_label.style().polish(self.jlink_status_label)
+        self.jlink_path_edit.style().unpolish(self.jlink_path_edit)
+        self.jlink_path_edit.style().polish(self.jlink_path_edit)
+
+        return is_valid
+
+    def validate_patch_root(self, path=None):
+        """验证 MCU 根目录下是否存在有效补丁包，更新状态图标"""
+        if path is None:
+            path = self.patch_root_edit.text().strip()
+
+        if not path or not os.path.isdir(path):
+            # 路径无效或不存在
+            self.patch_root_status_label.setText("✗")
+            self.patch_root_status_label.setProperty("valid", False)
+            self.patch_root_edit.setProperty("valid", False)
+            return False
+
+        # 调用核心函数检查有效补丁
+        folders = get_mcu_folders(path)
+        has_valid = len(folders) > 0
+        self.patch_root_valid = has_valid
+        self.patch_root_edit.setProperty("valid", has_valid)
+        self.patch_root_status_label.setProperty("valid", has_valid)
+        self.patch_root_status_label.setText("✓" if has_valid else "✗")
+        # 强制刷新样式
+        self.patch_root_edit.style().unpolish(self.patch_root_edit)
+        self.patch_root_edit.style().polish(self.patch_root_edit)
+        self.patch_root_status_label.style().unpolish(self.patch_root_status_label)
+        self.patch_root_status_label.style().polish(self.patch_root_status_label)
+
+        return has_valid
+
+    def is_directory_writable(self, path):
+        """通过实际尝试写入测试目录是否可写（准确，无长时间阻塞）"""
+        test_file = os.path.join(path, "__jflash_patch_test.tmp")
+        try:
+            with open(test_file, "w") as f:
+                f.write("test")
+            os.remove(test_file)
+            return True
+        except (OSError, IOError, PermissionError):
+            return False
+
+    def update_start_button_state(self):
+        """更新开始按钮状态：两个目录都有效时才启用"""
+        self.start_btn.setEnabled(self.jflash_valid and self.patch_root_valid)
+
+    # ------------------------------------------------------------------
     # 槽函数
     # ------------------------------------------------------------------
     def load_default_jflash_path(self):
         path = find_jflash_path()
         if path:
             self.jlink_path_edit.setText(path)
+            self.jflash_valid = self.validate_jflash_path(path)
+            self.log(f"自动检测到 JFlash 目录: {path}")
+        else:
+            self.log("未检测到 JFlash 目录，请手动选择。")
+
+    def set_default_patch_root(self):
+        """启动时从候选路径列表中查找第一个包含有效补丁的目录，并自动扫描"""
+        # 候选路径列表（按优先级排序）
+        candidate_paths = [
+            os.path.dirname(os.path.abspath(__file__)),  # GUI 所在目录
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "../patchs"),
+            os.getcwd(),  # 当前工作目录
+            os.path.join(os.getcwd(), "patchs"),
+        ]
+
+        selected_path = None
+        for path in candidate_paths:
+            if not os.path.isdir(path):
+                continue
+            # 检查是否包含有效补丁
+            folders = get_mcu_folders(path)
+            if folders:
+                selected_path = path
+                break
+        if selected_path is None:
+            # 回退到GUI所在目录（即使无效）
+            selected_path = os.path.dirname(os.path.abspath(__file__))
+        # 设置到输入框并验证/扫描
+        self.patch_root_edit.setText(selected_path)
+        self.scan_patches()
 
     def browse_jlink_path(self):
         dir_path = QFileDialog.getExistingDirectory(
             self, "选择 JFlash 安装目录", self.jlink_path_edit.text()
         )
         if dir_path:
+            self.jflash_valid = self.validate_jflash_path(dir_path)  # 手动调用验证
+            if self.jflash_valid:
+                self.log(f"JFlash 目录验证通过: {dir_path}")
+            else:
+                self.log(f"JFlash 目录验证失败: {dir_path}")
             self.jlink_path_edit.setText(dir_path)
-
-    def detect_jflash_path(self):
-        path = find_jflash_path()
-        if path:
-            self.jlink_path_edit.setText(path)
-            self.log(f"自动检测到 JFlash 目录: {path}")
-        else:
-            QMessageBox.warning(
-                self, "未找到", "无法自动定位 JFlash 目录，请手动选择。"
-            )
+            self.update_start_button_state()
 
     def browse_patch_root(self):
         dir_path = QFileDialog.getExistingDirectory(
@@ -368,18 +503,16 @@ class MainWindow(QMainWindow):
         if dir_path:
             self.patch_root_edit.setText(dir_path)
             self.scan_patches()
+            self.update_start_button_state()
 
     def scan_patches(self):
         patch_root = self.patch_root_edit.text().strip()
-        if not patch_root or not os.path.isdir(patch_root):
-            QMessageBox.warning(self, "无效目录", "请先选择有效的补丁根目录。")
-            return
-
+        # 先验证并更新状态
+        self.patch_root_valid = self.validate_patch_root(patch_root)
         self.patch_list.clear()
         folders = get_mcu_folders(patch_root)
         if not folders:
             self.log(f"在 {patch_root} 下未找到有效的 MCU 补丁文件夹。")
-            self.start_btn.setEnabled(False)
             return
 
         for folder in folders:
@@ -390,7 +523,6 @@ class MainWindow(QMainWindow):
             self.patch_list.addItem(item)
 
         self.log(f"扫描完成，共找到 {len(folders)} 个补丁。")
-        self.start_btn.setEnabled(True)
 
     def select_all(self):
         for i in range(self.patch_list.count()):
@@ -411,7 +543,17 @@ class MainWindow(QMainWindow):
         if not jflash_dir or not os.path.isdir(jflash_dir):
             QMessageBox.warning(self, "无效目录", "请先选择有效的 JFlash 安装目录。")
             return
-
+        # ===== 新增：检查目录写权限 =====
+        if not self.is_directory_writable(jflash_dir):
+            reply = QMessageBox.critical(
+                self,
+                "权限不足",
+                f"JFlash 安装目录位于系统保护位置：\n{jflash_dir}\n\n"
+                "当前程序没有写入权限。\n"
+                "请以管理员身份重新运行此程序。",
+                QMessageBox.StandardButton.Ok,
+            )
+            return False  # 终止操作
         selected_folders = []
         for i in range(self.patch_list.count()):
             item = self.patch_list.item(i)
@@ -433,7 +575,6 @@ class MainWindow(QMainWindow):
             return
 
         self.start_btn.setEnabled(False)
-        self.scan_btn.setEnabled(False)
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
         self.log_text.clear()
@@ -457,9 +598,34 @@ class MainWindow(QMainWindow):
 
     def on_patch_finished(self):
         self.start_btn.setEnabled(True)
-        self.scan_btn.setEnabled(True)
         self.progress_bar.setVisible(False)
         QMessageBox.information(self, "完成", "补丁操作已全部完成！")
+
+    def closeEvent(self, event):
+        """重写关闭事件，确保线程安全退出"""
+        if self.worker_thread and self.worker_thread.isRunning():
+            # 询问用户是否中断操作
+            reply = QMessageBox.question(
+                self,
+                "确认退出",
+                "正在执行补丁操作，确定要退出吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                # 通知工作线程停止
+                if self.worker:
+                    self.worker.stop()
+                self.worker_thread.quit()
+                # 等待线程结束，超时2秒
+                if not self.worker_thread.wait(2000):
+                    # 超时则强制终止（不推荐，但作为最后手段）
+                    self.worker_thread.terminate()
+                    self.worker_thread.wait()
+                event.accept()
+            else:
+                event.ignore()
+        else:
+            event.accept()
 
 
 # ----------------------------------------------------------------------
